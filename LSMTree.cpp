@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <cmath>
 #include <bitset>
+#include <map>
 
 using namespace std;
 using namespace std::chrono;
@@ -39,7 +40,6 @@ public:
 
 // --- CUSTOM RED-BLACK TREE ---
 enum Color { RED, BLACK };
-
 struct Node {
     string key, value;
     Color color;
@@ -50,9 +50,9 @@ struct Node {
 class RedBlackTree {
 private:
     Node* root;
-    void rotateLeft(Node*&);
-    void rotateRight(Node*&);
-    void fixInsert(Node*&);
+    void rotateLeft(Node*& x);
+    void rotateRight(Node*& x);
+    void fixInsert(Node*& z);
     void deleteTree(Node* node) {
         if (!node) return;
         deleteTree(node->left);
@@ -63,7 +63,6 @@ private:
 public:
     RedBlackTree() : root(nullptr) {}
     ~RedBlackTree() { deleteTree(root); }
-    
     void insert(string key, string value);
     string search(string key);
     void traverse(Node* node, vector<pair<string, string>>& entries);
@@ -74,7 +73,7 @@ public:
 // --- LSM TREE ---
 struct SSTable {
     int id;
-    vector<pair<string, string>> data; // Sorted array simulation
+    vector<pair<string, string>> data; 
     BloomFilter filter;
 };
 
@@ -88,17 +87,15 @@ private:
 
 public:
     LSMTree(int memThreshold) : threshold(memThreshold), tableCounter(0) {
-        cout << "--- [SYSTEM START] LSM Tree (Custom RBT + Bloom Filter) ---" << endl;
+        cout << "--- [SYSTEM START] LSM Tree (RBT + Bloom + Compaction) ---" << endl;
     }
 
     void put(string key, string value) {
         Profiler p;
         cout << "\n[PUT] Key: '" << key << "' Value: '" << value << "'" << endl;
-        
         memTable.insert(key, value);
         memFilter.add(key);
-        
-        cout << "  >> Performance: " << p.elapsed() << " us (RBT Insert + Bloom Update)" << endl;
+        cout << "  >> Performance: " << p.elapsed() << " us (MemTable Update)" << endl;
 
         static int count = 0;
         if (++count >= threshold) {
@@ -108,31 +105,62 @@ public:
     }
 
     void flushToDisk() {
-        cout << ">>> [MEMTABLE FULL] Flushing RBT to SSTable..." << endl;
+        cout << ">>> [MEMTABLE FULL] Flushing to SSTable..." << endl;
         Profiler p;
-        
         SSTable* table = new SSTable();
         table->id = ++tableCounter;
         memTable.traverse(memTable.getRoot(), table->data);
-        
-        // Build Bloom Filter for the SSTable
         for (auto& entry : table->data) table->filter.add(entry.first);
         
         diskLevels.push_back(table);
         memTable.clear();
         memFilter.clear();
         
-        cout << ">>> [DISK] SSTable #" << table->id << " created." << endl;
-        cout << "  >> Performance: " << p.elapsed() << " us (Flush + Filter Build)" << endl;
+        cout << ">>> [DISK] SSTable #" << table->id << " created (" << table->data.size() << " keys)." << endl;
+        cout << "  >> Performance: " << p.elapsed() << " us" << endl;
+
+        // Trigger compaction if we have more than 2 tables
+        if (diskLevels.size() >= 3) {
+            compact();
+        }
+    }
+
+    void compact() {
+        cout << "!!! [COMPACTION] Merging " << diskLevels.size() << " SSTables..." << endl;
+        Profiler p;
+        
+        // Multi-way merge: We use a map to keep the newest value for each key
+        // In a real LSM, you'd use a priority queue for efficiency
+        map<string, string> mergedMap;
+        for (auto* table : diskLevels) {
+            for (auto& entry : table->data) {
+                mergedMap[entry.first] = entry.second; // Newer tables overwrite older ones
+            }
+        }
+
+        // Clean up old tables
+        for (auto* table : diskLevels) delete table;
+        diskLevels.clear();
+
+        // Create new compacted SSTable
+        SSTable* compacted = new SSTable();
+        compacted->id = 999; // ID for compacted table
+        for (auto const& [key, val] : mergedMap) {
+            compacted->data.push_back({key, val});
+            compacted->filter.add(key);
+        }
+        diskLevels.push_back(compacted);
+
+        cout << "!!! [COMPACTION COMPLETE] Result: 1 Table, " << compacted->data.size() << " unique keys." << endl;
+        cout << "  >> Performance: " << p.elapsed() << " us" << endl;
     }
 
     void get(string key) {
         cout << "\n[GET] Searching for '" << key << "'..." << endl;
         Profiler p;
 
-        // 1. Check MemTable Bloom Filter First (Optimization!)
         if (!memFilter.possiblyContains(key)) {
-            cout << "  [Bloom] Key definitely not in MemTable. Skipping RBT search." << endl;
+            cout << "  [Bloom] Skip: Not in MemTable." << endl;
         } else {
             string val = memTable.search(key);
             if (val != "") {
@@ -141,13 +169,11 @@ public:
             }
         }
 
-        // 2. Check SSTables with Bloom Filters
         for (int i = diskLevels.size() - 1; i >= 0; i--) {
             if (!diskLevels[i]->filter.possiblyContains(key)) {
-                cout << "  [Bloom] Key not in SSTable #" << diskLevels[i]->id << ". Skipping disk level." << endl;
+                cout << "  [Bloom] Skip: Not in SSTable #" << diskLevels[i]->id << endl;
                 continue;
             }
-            // Real search would happen here
             for (auto& entry : diskLevels[i]->data) {
                 if (entry.first == key) {
                     cout << "Found in [SSTable #" << diskLevels[i]->id << "]: " << entry.second << " | Time: " << p.elapsed() << " us" << endl;
@@ -159,7 +185,7 @@ public:
     }
 };
 
-// --- RED-BLACK TREE LOGIC (Simplified for execution) ---
+// --- RED-BLACK TREE LOGIC ---
 void RedBlackTree::insert(string key, string value) {
     Node* z = new Node(key, value);
     Node* y = nullptr;
@@ -191,8 +217,19 @@ void RedBlackTree::fixInsert(Node*& z) {
                 z->parent->parent->color = RED;
                 rotateRight(z->parent->parent);
             }
-        } else { /* Symmetric case */ 
-            z->color = BLACK; // Simplified for demo brevity
+        } else {
+            Node* y = z->parent->parent->left;
+            if (y && y->color == RED) {
+                z->parent->color = BLACK;
+                y->color = BLACK;
+                z->parent->parent->color = RED;
+                z = z->parent->parent;
+            } else {
+                if (z == z->parent->left) { z = z->parent; rotateRight(z); }
+                z->parent->color = BLACK;
+                z->parent->parent->color = RED;
+                rotateLeft(z->parent->parent);
+            }
         }
     }
     root->color = BLACK;
@@ -236,12 +273,14 @@ string RedBlackTree::search(string key) {
 
 int main() {
     LSMTree db(2);
-    db.put("user1", "Active");
-    db.put("user2", "Banned"); // Flush
-    db.put("user3", "Active");
-    db.put("user4", "Pending"); // Flush
-    
-    db.get("user1"); // In SSTable 1 (Bloom Filter will hit)
-    db.get("user99"); // Not in any table (Bloom Filter will skip searches)
+    db.put("user1", "V1");
+    db.put("user2", "V1"); // Flush 1
+    db.put("user1", "V2"); // Update
+    db.put("user3", "V1"); // Flush 2
+    db.put("user4", "V1");
+    db.put("user5", "V1"); // Flush 3 + Compaction
+
+    db.get("user1"); // Should return V2
+    db.get("user99"); // Bloom Filter should skip
     return 0;
 }
